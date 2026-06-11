@@ -1,8 +1,6 @@
 # LETI: Learned Space-Filling Curve for Efficient Trajectory Indexing
 
-This repository contains the official source code for the paper:
-
-**"LETI: Learned Space-Filling Curve for Efficient Trajectory Indexing in Key-Value Databases"**
+Official implementation of **LETI: Learned Space-Filling Curve for Efficient Trajectory Indexing in Key-Value Databases**.
 
 ## Installation
 
@@ -16,7 +14,7 @@ This repository contains the official source code for the paper:
 1. Clone this repository:
 ```bash
 git clone <repository-url>
-cd RLLSFC-Public
+cd LETI-RLLSFC
 ```
 
 2. Install dependencies:
@@ -48,14 +46,7 @@ trajectory_id|timestamp|longitude|latitude
 Query files are in JSON format:
 
 ```json
-[
-  {
-    "min_lon": 116.3,
-    "min_lat": 39.8,
-    "max_lon": 116.5,
-    "max_lat": 40.0
-  }
-]
+[{"min_lon": 116.3, "min_lat": 39.8, "max_lon": 116.5, "max_lat": 40.0}]
 ```
 
 Query datasets should be organized as:
@@ -81,56 +72,28 @@ A learned order file contains two main sections: `ordering` and `metadata`.
 {
   "ordering": [
     {
-      "quad_code": 0,
-      "order": 0,
+      "quad_code": 0, "order": 0,
       "parent": {
-        "alpha": 2,
-        "beta": 2,
-        "level": 0,
-        "element_code": 0,
-        "xmin": 0.0,
-        "ymin": 0.0,
-        "xmax": 1.0,
-        "ymax": 1.0
+        "alpha": 2, "beta": 2,
+        "level": 0, "element_code": 0,
+        "xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0
       },
       "coverage": {
         "effective_subtree_count": 15,
-        "effective_subtree_orders": [
-          1,
-          2,
-          3,
-          "..."
-        ]
+        "effective_subtree_orders": [1, 2, 3, "..."]
       }
     },
     "..."
   ],
   "metadata": {
-    "total_cells": 256,
-    "active_cells": 128,
-    "spatial_boundary": {
-      "xmin": 115.29,
-      "ymin": 39.00,
-      "xmax": 117.83,
-      "ymax": 41.50
-    },
-    "quadtree_max_level": 7,
-    "global_alpha": 2,
-    "global_beta": 2,
+    "total_cells": 256, "active_cells": 128,
+    "spatial_boundary": {"xmin": 115.29, "ymin": 39.00, "xmax": 117.83, "ymax": 41.50},
+    "quadtree_max_level": 7, "global_alpha": 2, "global_beta": 2,
     "generation_timestamp": "20xx-xx-xxTxx:xx:xx",
-    "version": "1.4",
+    "version": "1.0",
     "order_source": "rl_quadorder",
     "effective_subtree_contiguous": false,
-    "partition_search": [
-      [
-        2,
-        2
-      ],
-      [
-        8,
-        8
-      ]
-    ],
+    "partition_search": [[2, 2], [8, 8]],
     "max_partition": 64,
     "max_shape_count": 16,
     "min_trajs": 10
@@ -154,7 +117,7 @@ Each entry in the `ordering` array represents a quadtree cell in the learned tra
   - **`xmin`, `ymin`, `xmax`, `ymax`**: Spatial bounding box coordinates
 - **`coverage`**: Subtree coverage information
   - **`effective_subtree_count`**: Number of descendant cells in the active tree
-  - **`effective_subtree_orders`**: Order indices of all descendants (omitted for XZ orders to save space)
+  - **`effective_subtree_orders`**: Order indices of all descendants (omitted for XZ orders)
 
 #### Metadata Object
 
@@ -173,7 +136,7 @@ Global information about the learned order:
   - `"rl_quadorder"`: Learned via reinforcement learning
   - `"default_xz_order"`: Standard Z-order
   - `"hilbert_order"`: Hilbert curve
-- **`effective_subtree_contiguous`**: Whether subtrees are contiguous in the order
+- **`effective_subtree_contiguous`**: Whether subtrees are contiguous in the order (True for XZ Order)
 - **`partition_search`**: Range of partition parameters explored during optimization
 - **`max_partition`**: Maximum partition size (alpha × beta) used
 - **`max_shape_count`** Maximum number of unique signatures per cell
@@ -192,5 +155,5 @@ python scripts/preprocess/generate_queries.py --dataset tdrive
 
 Train the RL model with configuration:
 ```bash
-python -m scripts.experiments.run_pipeline --config configs/experiments/test/config.yaml --name test
+python -m scripts.experiments.run_pipeline --config configs/experiments/default/config.yaml --name default
 ```
