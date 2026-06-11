@@ -43,18 +43,8 @@ Query data is stored in JSON format with an array of bounding box queries:
 
 ```json
 [
-  {
-    "min_lon": 116.3,
-    "min_lat": 39.8,
-    "max_lon": 116.5,
-    "max_lat": 40.0
-  },
-  {
-    "min_lon": 116.4,
-    "min_lat": 39.9,
-    "max_lon": 116.6,
-    "max_lat": 40.1
-  }
+  {"min_lon": 116.3, "min_lat": 39.8, "max_lon": 116.5, "max_lat": 40.0},
+  {"min_lon": 116.4, "min_lat": 39.9, "max_lon": 116.6, "max_lat": 40.1}
 ]
 ```
 

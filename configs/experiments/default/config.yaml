@@ -13,27 +13,27 @@ datasets:
       description: "Beijing TDrive trajectory dataset."
       trajectory_path: null  # Set via env var or override
       query_root: "resource/queries/tdrive"
-      min_x: 115.29
-      min_y: 39.00
-      max_x: 117.83
-      max_y: 41.50
+      min_x: xxx
+      min_y: xxx
+      max_x: xxx
+      max_y: xxx
     chengdu:
       description: "Chengdu CDTaxi trajectory dataset."
       trajectory_path: null
       query_root: "resource/queries/chengdu"
-      min_x: 104.04
-      min_y: 30.65
-      max_x: 104.13
-      max_y: 30.73
+      min_x: xxx
+      min_y: xxx
+      max_x: xxx
+      max_y: xxx
 
 index:
   max_level: 8
   alpha: 2
   beta: 2
-  min_x: 115.29
-  min_y: 39.00
-  max_x: 117.83
-  max_y: 41.50
+  min_x: xxx
+  min_y: xxx
+  max_x: xxx
+  max_y: xxx
   use_original_bbox: true
   use_prune: true
   min_cell_trajs: 4

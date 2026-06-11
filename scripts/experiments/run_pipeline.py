@@ -1,8 +1,7 @@
 """Unified experiment run script: uses LSFCPipeLine for model training and order export
 
 Usage:
-    python -m scripts.experiments.run_pipeline --config configs/experiments/test/config.yaml --name test
-    python -m scripts.experiments.run_pipeline --config configs/experiments/formal/config.yaml --name formal
+    python -m scripts.experiments.run_pipeline --config configs/experiments/default/config.yaml --name default
 """
 import argparse
 import json
