@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -85,21 +86,52 @@ class LSFCPipeLine:
             raise RuntimeError("Trainer or agent is not initialized.")
         return self.trainer.rollout_policy_order(self.trainer.agent, self.trainer.environment)
 
-    def run_post_evaluation(self, model_path: str, export_prefix: str):
-        if not self.postprocessor:
+    def evaluate_on_test(self, model_path: Optional[str] = None) -> Dict[str, Any]:
+        """Evaluate the already selected model on the held-out test query set."""
+        if not self.trainer or not self.postprocessor:
             self.initialize_components()
 
-        self.load_trained_model(model_path)
-        order = self.generate_quadorder()
-        self.postprocessor.process_quadorder(order, self.trainer.quadtree)
+        if model_path:
+            self.load_trained_model(model_path)
+            self.postprocessor.best_model_path = Path(model_path)
 
         test_queries = self.trainer.environment.test_queries
-        if test_queries:
-            evaluator = self.postprocessor.get_evaluator(self.trainer)
-            self.postprocessor.processing_metadata["evaluation"] = evaluator.compute_hgs_score(order, test_queries)
+        if test_queries is None:
+            raise RuntimeError("Test query set unavailable.")
 
-        self.postprocessor.best_model_path = Path(model_path)
-        return self.postprocessor.export_formats(self.trainer, base_prefix=export_prefix)
+        order = self.postprocessor.quadorder
+        if model_path or not order:
+            order = self.generate_quadorder()
+
+        evaluator = self.postprocessor._create_evaluator(self.trainer, test_queries)
+        test_metrics = evaluator.evaluate_final_order(order)
+
+        evaluation = self.postprocessor.processing_metadata.setdefault("evaluation", {})
+        evaluation["test_improvement"] = test_metrics["improvement_percent"]
+        evaluation["test_metrics"] = test_metrics
+
+        self._save_final_evaluation(test_metrics)
+        self.logger.info(
+            "Test improvement (vs QuadCode): %.2f%%", test_metrics["improvement_percent"]
+        )
+        return test_metrics
+
+    def _save_final_evaluation(self, test_metrics: Dict[str, Any]) -> None:
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "model_path": str(self.postprocessor.best_model_path),
+            "test_metrics": {
+                "quadcode_avg_cost": float(test_metrics["quadcode_avg_cost"]),
+                "quadorder_avg_cost": float(test_metrics["quadorder_avg_cost"]),
+                "improvement_percent": float(test_metrics["improvement_percent"]),
+                "quadcode_nodes_hit": float(test_metrics["quadcode_nodes_hit"]),
+                "quadorder_nodes_hit": float(test_metrics.get("quadorder_nodes_hit", 0)),
+            },
+        }
+        record_path = self.resource_paths["results"] / "final_evaluation.json"
+        with open(record_path, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=2, ensure_ascii=False)
+        self.logger.info("Final test evaluation saved: %s", record_path)
 
     def _resolve_model_for_export(self, trained_model_path: str) -> str:
         best_record_path = self.config.experiment.get_results_dir(self.config.paths) / "best_model_record.json"
@@ -124,37 +156,28 @@ class LSFCPipeLine:
 
         train_queries = self.trainer.environment.reference_queries
         val_queries = self.trainer.environment.val_queries
-        test_queries = self.trainer.environment.test_queries
-        if train_queries is None or val_queries is None or test_queries is None:
-            raise RuntimeError("Train/val/test query sets must all be available for pipeline evaluation.")
+        if train_queries is None or val_queries is None:
+            raise RuntimeError("Train/val query sets must both be available for pipeline evaluation.")
 
         evaluator_train = self.postprocessor._create_evaluator(self.trainer, train_queries)
         evaluator_val = self.postprocessor._create_evaluator(self.trainer, val_queries)
-        evaluator_test = self.postprocessor._create_evaluator(self.trainer, test_queries)
         train_metrics = evaluator_train.evaluate_final_order(quadorder)
         val_metrics = evaluator_val.evaluate_final_order(quadorder)
-        test_metrics = evaluator_test.evaluate_final_order(quadorder)
-        hgs_score = (val_metrics["improvement_percent"] + test_metrics["improvement_percent"]) / 2
 
         self.postprocessor.process_quadorder(quadorder, self.trainer.quadtree)
         self.postprocessor.best_model_path = Path(model_path)
         self.postprocessor.processing_metadata["evaluation"] = {
-            "i_val": val_metrics["improvement_percent"],
-            "i_test": test_metrics["improvement_percent"],
-            "hgs_score": hgs_score,
             "train_improvement": train_metrics["improvement_percent"],
             "val_improvement": val_metrics["improvement_percent"],
-            "test_improvement": test_metrics["improvement_percent"],
             "train_metrics": train_metrics,
             "val_metrics": val_metrics,
-            "test_metrics": test_metrics,
         }
 
         export_results = self.postprocessor.export_formats(self.trainer, base_prefix=export_prefix)
         return {
             "model_path": model_path,
             "quadorder_length": len(quadorder),
-            "improvement_rate": test_metrics["improvement_percent"],
+            "val_improvement": val_metrics["improvement_percent"],
             "quadtree_stats": self.postprocessor.processing_metadata["quadtree_stats"],
             "export_results": export_results,
             "summary_report": self.postprocessor.get_summary_report(),

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -252,33 +252,6 @@ class TraversalPerformanceEvaluator:
 
         merged = self.cost_evaluator.merge_intervals(row_intervals)
         return [(int(start), int(end)) for start, end in merged], candidate_traj_ids, 0
-
-    def compute_hgs_score(
-        self,
-        quadorder: List[QuadTreeCell],
-        test_queries: List[SpatialBoundingBox],
-    ) -> Dict[str, Any]:
-        ref_metrics = self.evaluate_final_order(quadorder)
-        i_ref = ref_metrics["improvement_percent"]
-
-        original_queries = self.reference_queries
-        self.reference_queries = test_queries
-
-        test_metrics = self.evaluate_final_order(quadorder)
-        i_test = test_metrics["improvement_percent"]
-
-        self.reference_queries = original_queries
-
-        gap = abs(i_ref - i_test)
-        max_val = max(i_ref, i_test, 1e-6)
-        score = i_test * (1 - (gap / max_val))
-
-        return {
-            "i_ref": i_ref,
-            "i_test": i_test,
-            "hgs_score": score,
-            "test_metrics": test_metrics,
-        }
 
     def compare_orders(self, quadcode_order: List[QuadTreeCell], quadorder: List[QuadTreeCell]) -> dict:
         if self.reference_queries is None:

@@ -37,14 +37,17 @@ class LSFCEvaluator:
         self.best_model_path: Optional[Path] = None
         self.processing_metadata: Dict[str, Any] = {}
 
-    def select_best_model_from_metrics(self, model_dir: str) -> Tuple[Optional[Path], Optional[Dict]]:
+    def select_best_model_from_metrics(self, model_dir: str,
+                                       run_id: Optional[str] = None) -> Tuple[Optional[Path], Optional[Dict]]:
         """
-        Select the model with the highest HGS score from saved metrics files.
+        Select the model with the highest validation improvement from saved metrics files.
         
-        Instead of re-evaluating all checkpoints, directly read epXXXXXX_metrics.json files to compute HGS.
+        Instead of re-evaluating all checkpoints, directly read epXXXXXX_metrics.json files.
+        The test split never participates in this selection.
         
         Args:
             model_dir: Model directory path
+            run_id: When given, only checkpoints produced by that training run are considered
             
         Returns:
             (Best model path, best record dictionary)
@@ -56,29 +59,35 @@ class LSFCEvaluator:
             self.logger.warning(f"No metrics files found in {model_dir}")
             return None, None
 
-        best_hgs = -float('inf')
+        best_val = -float('inf')
         best_record = None
+        foreign_runs = 0
 
-        print(f"\n{'Episode':<10} | {'Train Imp':<10} | {'Val Imp':<10} | {'Test Imp':<10} | {'HGS Score':<10}")
-        print("-" * 70)
+        print(f"\n{'Episode':<10} | {'Train Imp':<10} | {'Val Imp(for selection)':<20}")
+        print("-" * 46)
 
         for metrics_file in metrics_files:
             try:
                 with open(metrics_file, 'r', encoding='utf-8') as f:
                     metrics = json.load(f)
 
+                if run_id is not None and metrics.get('run_id') != run_id:
+                    foreign_runs += 1
+                    continue
+
                 episode = metrics.get('episode', 0)
-                val_imp = metrics.get('val', {}).get('improvement_percent', 0)
-                test_imp = metrics.get('test', {}).get('improvement_percent', 0)
+                val_metrics = metrics.get('val')
+                if not val_metrics or 'improvement_percent' not in val_metrics:
+                    self.logger.warning(f"Missing val improvement in {metrics_file}, skipped")
+                    continue
+
+                val_imp = val_metrics['improvement_percent']
                 train_imp = metrics.get('train', {}).get('improvement_percent', 0) if metrics.get('train') else 0
 
-                hgs_score = (val_imp + test_imp) / 2
+                print(f"{episode:<10} | {train_imp:>+9.2f}% | {val_imp:>+19.2f}%")
 
-                print(
-                    f"{episode:<10} | {train_imp:>+9.2f}% | {val_imp:>+9.2f}% | {test_imp:>+9.2f}% | {hgs_score:>9.4f}")
-
-                if hgs_score > best_hgs:
-                    best_hgs = hgs_score
+                if val_imp > best_val:
+                    best_val = val_imp
                     model_file = model_dir / f"ep{episode:06d}_val{val_imp:+.2f}.pth"
                     if not model_file.exists():
                         model_file = model_dir / f"model_ep_{episode}.pth"
@@ -88,19 +97,24 @@ class LSFCEvaluator:
                         "metrics_file": metrics_file,
                         "episode": episode,
                         "metrics": metrics,
-                        "hgs_score": hgs_score,
+                        "run_id": metrics.get('run_id'),
+                        "selection_metric": "val_improvement_percent",
                         "val_improvement": val_imp,
-                        "test_improvement": test_imp,
                         "train_improvement": train_imp,
                     }
             except Exception as e:
                 self.logger.warning(f"Failed to read {metrics_file}: {e}")
                 continue
 
-        print("-" * 70)
+        print("-" * 46)
+
+        if foreign_runs:
+            self.logger.warning(
+                f"Ignored {foreign_runs} checkpoint metrics files left over from other training runs"
+            )
 
         if best_record:
-            print(f"[*] Best model: Episode {best_record['episode']}, HGS={best_hgs:.4f}")
+            print(f"[*] Best model: Episode {best_record['episode']}, Val={best_val:+.2f}%")
             print(f"    Path: {best_record['model_path']}\n")
 
         return best_record["model_path"] if best_record else None, best_record
@@ -129,9 +143,7 @@ class LSFCEvaluator:
         self.quadorder = quadorder
         self.processing_metadata["evaluation"] = {
             'val_improvement': best_record['val_improvement'],
-            'test_improvement': best_record['test_improvement'],
             'train_improvement': best_record['train_improvement'],
-            'hgs_score': best_record['hgs_score'],
             'episode': best_record['episode'],
             'metrics': best_record['metrics']
         }
@@ -147,7 +159,7 @@ class LSFCEvaluator:
 
         return {
             "best_model_path": str(best_model_path),
-            "hgs_score": best_record['hgs_score'],
+            "val_improvement": best_record['val_improvement'],
             "export_results": export_results,
             "summary_report": self.get_summary_report()
         }
@@ -161,9 +173,9 @@ class LSFCEvaluator:
                 "best_model_path": str(best_record['model_path']),
                 "metrics_file": str(best_record['metrics_file']),
                 "episode": best_record['episode'],
-                "hgs_score": best_record['hgs_score'],
+                "run_id": best_record['run_id'],
+                "selection_metric": best_record['selection_metric'],
                 "val_improvement": best_record['val_improvement'],
-                "test_improvement": best_record['test_improvement'],
                 "train_improvement": best_record['train_improvement'],
             }, f, indent=2, ensure_ascii=False)
         self.logger.info(f"Best model record saved: {record_path}")
@@ -264,7 +276,6 @@ class LSFCEvaluator:
         val_imp = eval_m.get('val_improvement', 0)
         test_imp = eval_m.get('test_improvement', 0)
         train_imp = eval_m.get('train_improvement', 0)
-        hgs = eval_m.get('hgs_score', (val_imp + test_imp) / 2 if val_imp and test_imp else 0)
 
         report = [
             "\n" + "=" * 65,
@@ -277,8 +288,6 @@ class LSFCEvaluator:
             f" Train Improvement: {train_imp:>7.2f}%" if train_imp else " Train Improvement:    N/A",
             f" Val Improvement:   {val_imp:>7.2f}%" if val_imp else " Val Improvement:      N/A",
             f" Test Improvement:  {test_imp:>7.2f}%" if test_imp else " Test Improvement:     N/A",
-            "-" * 65,
-            f" >>> HGS Score:    {hgs:>10.4f} <<<",
             "-" * 65,
         ]
 
@@ -303,23 +312,6 @@ class LSFCEvaluator:
             "beta": self.config.index.beta,
             "max_level": self.config.index.max_level
         }
-
-    def get_evaluator(self, trainer: TraversalTrainer):
-        """Get evaluator instance."""
-        from src.evaluation.traversal_evaluator import TraversalPerformanceEvaluator
-
-        reference_queries = self._load_saved_queries('reference_queries.pkl')
-        if reference_queries is None:
-            self.logger.warning("Saved reference query set not found, using query set from environment")
-            reference_queries = trainer.environment.reference_queries
-        else:
-            self.logger.info(f"Loaded saved reference query set: {len(reference_queries)} queries")
-
-        return TraversalPerformanceEvaluator(
-            trainer.quadtree, trainer.encoder, trainer.cost_evaluator,
-            reference_queries=reference_queries,
-            quadcode_include_muted=self.config.index.quadcode_include_muted
-        )
 
     def generate_test_queries(self, quadtree: QuadTreeIndex):
         test_queries = self._load_saved_queries('test_queries.pkl')

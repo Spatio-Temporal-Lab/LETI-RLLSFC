@@ -9,19 +9,23 @@ import os
 import time
 import traceback
 from pathlib import Path
+from typing import List, Optional
 
-from src.config import NetworkConfig, TShapeConfig
+from src.config import TShapeConfig
 from src.rl.pipeline import LSFCPipeLine
 from src.utils.logger import setup_logging
 
 
-def run_rl_indexing_experiment(config_path: str, exp_name: str, nt_config: NetworkConfig):
+def run_rl_indexing_experiment(config_path: str, exp_name: str,
+                               hidden_dims: Optional[List[int]] = None,
+                               device: Optional[str] = None):
     """Execute complete RL index optimization experiment.
 
     Args:
         config_path: YAML configuration file path
         exp_name: Experiment name (e.g., test/formal)
-        nt_config: Neural network configuration object
+        hidden_dims: Overrides the network hidden dimensions from the configuration file
+        device: Overrides the computing device from the configuration file
     """
     ts_config = TShapeConfig.from_yaml(config_path)
 
@@ -31,11 +35,11 @@ def run_rl_indexing_experiment(config_path: str, exp_name: str, nt_config: Netwo
 
     os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
-    if nt_config is None:
-        nt_config = NetworkConfig(
-            hidden_dims=[256, 256],
-            device="auto"
-        )
+    nt_config = ts_config.network
+    if hidden_dims:
+        nt_config.hidden_dims = list(hidden_dims)
+    if device:
+        nt_config.device = device
 
     export_prefix = f"quadorder_{exp_name}_{timestamp}"
 
@@ -55,7 +59,10 @@ def run_rl_indexing_experiment(config_path: str, exp_name: str, nt_config: Netwo
         duration = (end_time - start_time) / 60
         logger.info(f"Pipeline executed successfully, time elapsed: {duration:.2f} minutes")
 
-        logger.info("Step 2: Validating output results...")
+        logger.info("Step 2: Evaluating selected model on the test query set...")
+        test_metrics = pipeline.evaluate_on_test()
+
+        logger.info("Step 3: Validating output results...")
         orders_dir = Path(pipeline.resource_paths["results"])
         models_dir = Path(pipeline.resource_paths["checkpoints"])
 
@@ -68,11 +75,12 @@ def run_rl_indexing_experiment(config_path: str, exp_name: str, nt_config: Netwo
         print("-" * 50)
         print(f"Model save path: {models_dir}")
         print(f"Total learned nodes: {results['quadorder_length']}")
-        improvement_rate = results.get('improvement_rate', None)
-        if improvement_rate is not None:
-            print(f"Improvement rate (vs QuadCode): {improvement_rate:.2f}%")
+        val_improvement = results.get('val_improvement', None)
+        if val_improvement is not None:
+            print(f"Val improvement (model selection): {val_improvement:.2f}%")
         else:
-            print(f"Improvement rate (vs QuadCode): N/A")
+            print(f"Val improvement: N/A")
+        print(f"Test improvement (vs QuadCode): {test_metrics['improvement_percent']:.2f}%")
 
         print("\nExported file status:")
         for fname in check_files:
@@ -119,21 +127,16 @@ if __name__ == "__main__":
         "--hidden-dims",
         type=int,
         nargs=2,
-        default=[256, 256],
-        help="Neural network hidden layer dimensions (default: 256 256)"
+        default=None,
+        help="Neural network hidden layer dimensions (overrides the configuration file)"
     )
     parser.add_argument(
         "--device",
         type=str,
-        default="auto",
-        help="Computing device (auto/cuda/cpu, default: auto)"
+        default=None,
+        help="Computing device (auto/cuda/cpu, overrides the configuration file)"
     )
 
     args = parser.parse_args()
 
-    network_config = NetworkConfig(
-        hidden_dims=list(args.hidden_dims),
-        device=args.device
-    )
-
-    run_rl_indexing_experiment(args.config, args.name, network_config)
+    run_rl_indexing_experiment(args.config, args.name, args.hidden_dims, args.device)

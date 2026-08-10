@@ -230,10 +230,6 @@ class IndexConfig:
         max_level: Maximum depth level of the quadtree
         alpha: Number of cells to expand elements in X direction
         beta: Number of cells to expand elements in Y direction
-        min_x: Minimum X coordinate of original bounding box (longitude)
-        min_y: Minimum Y coordinate of original bounding box (latitude)
-        max_x: Maximum X coordinate of original bounding box (longitude)
-        max_y: Maximum Y coordinate of original bounding box (latitude)
         use_original_bbox: Whether to use original bounding box (instead of normalized [0,0,1,1])
         use_prune: Whether to enable node pruning logic
         min_cell_trajs: Minimum trajectory count threshold in node, nodes below this will be pruned
@@ -255,14 +251,6 @@ class IndexConfig:
     
     parallel_signatures: bool = True
     signature_workers: Optional[int] = None
-
-    def get_bbox_tuple(self) -> Tuple[float, float, float, float]:
-        """Get bounding box tuple
-        
-        Returns:
-            (min_x, min_y, max_x, max_y) quadruple
-        """
-        return self.min_x, self.min_y, self.max_x, self.max_y
 
 
 @dataclass
@@ -352,12 +340,10 @@ class NetworkConfig:
         hidden_dims: Hidden layer dimensions list of neural network
         device: Device option ('auto'/'cuda'/'cpu')
         dropout: Dropout ratio
-        state_dim: State feature dimension
     """
     hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
     device: str = 'auto'
     dropout: float = 0.1
-    state_dim: int = 14
 
     def get_torch_device(self) -> torch.device:
         """Get PyTorch device
@@ -616,9 +602,9 @@ class TShapeConfig:
     def get_effective_bbox_tuple(self) -> Tuple[float, float, float, float]:
         """Get current effective bounding box, prioritizing active dataset's boundary."""
         profile = self.get_active_dataset_profile()
-        if profile is not None:
-            return profile.get_bbox_tuple()
-        return self.index.get_bbox_tuple()
+        if profile is None:
+            raise ValueError(f"Current dataset {self.datasets.active} has no bbox configured")
+        return profile.get_bbox_tuple()
 
     def get_original_bbox(self):
         """Get original bounding box object

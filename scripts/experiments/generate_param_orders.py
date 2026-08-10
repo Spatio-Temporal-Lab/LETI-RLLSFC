@@ -110,13 +110,13 @@ def parse_args() -> argparse.Namespace:
         "--hidden-dims",
         type=int,
         nargs=2,
-        default=[256, 256],
+        default=None,
         help="network hidden dims",
     )
     parser.add_argument(
         "--device",
         type=str,
-        default="auto",
+        default=None,
         help="training device",
     )
     parser.add_argument(
@@ -311,7 +311,7 @@ def get_existing_case_record(
         "order_file": str(order_path),
         "model_path": model_path,
         "quadorder_length": None,
-        "improvement_rate": None,
+        "val_improvement": None,
         "summary_report": f"Skipped existing case: {config.experiment.name}",
         "quadtree_stats": None,
         "error": None,
@@ -368,7 +368,7 @@ def run_single_case_xz(
         "export_results": {"json": str(order_path)},
         "model_path": None,
         "quadorder_length": len(xz_order),
-        "improvement_rate": None,
+        "val_improvement": None,
         "summary_report": f"Generated XZ order for {config.experiment.name}",
         "quadtree_stats": quadtree.get_quadtree_stats(),
     }
@@ -436,7 +436,7 @@ def run_single_case(
         "order_file": str(order_path) if order_path else None,
         "model_path": results.get("model_path"),
         "quadorder_length": results.get("quadorder_length"),
-        "improvement_rate": results.get("improvement_rate"),
+        "val_improvement": results.get("val_improvement"),
         "summary_report": results.get("summary_report"),
         "quadtree_stats": results.get("quadtree_stats"),
         "error": None,
@@ -466,7 +466,7 @@ def save_csv(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
         "order_file",
         "model_path",
         "quadorder_length",
-        "improvement_rate",
+        "val_improvement",
         "error",
     ]
     with open(path, "w", encoding="utf-8", newline="") as file_obj:
@@ -588,7 +588,7 @@ def append_case(
             "order_file": None,
             "model_path": None,
             "quadorder_length": None,
-            "improvement_rate": None,
+            "val_improvement": None,
             "error": str(exc),
             "traceback": traceback.format_exc(),
         }
@@ -615,12 +615,11 @@ def main() -> None:
         raise FileNotFoundError(f"Base config file not found: {base_config_path}")
 
     base_config = TShapeConfig.from_yaml(str(base_config_path))
-    network_config = NetworkConfig(
-        hidden_dims=list(args.hidden_dims),
-        device=args.device,
-        dropout=base_config.network.dropout,
-        state_dim=base_config.network.state_dim,
-    )
+    network_config = base_config.network
+    if args.hidden_dims:
+        network_config.hidden_dims = list(args.hidden_dims)
+    if args.device:
+        network_config.device = args.device
     output_dir = ensure_output_dir(args.distribution, args.tag, args.resource_dir)
 
     records: List[Dict[str, Any]] = []

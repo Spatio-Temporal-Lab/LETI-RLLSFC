@@ -22,9 +22,6 @@ class TrainingState:
     val_improvement_history: List[float] = field(default_factory=list)
     """Historical improvement rate records for validation set at each evaluation"""
     
-    test_improvement_history: List[float] = field(default_factory=list)
-    """Historical improvement rate records for test set at each evaluation"""
-    
     loss_history: List[float] = field(default_factory=list)
     """Loss function value at each episode update"""
     
@@ -58,21 +55,18 @@ class TrainingState:
     
     def record_evaluation(self, episode: int, 
                           train_improvement: float,
-                          val_improvement: float,
-                          test_improvement: float) -> None:
+                          val_improvement: float) -> None:
         """Record evaluation results.
         
         Args:
             episode: Current episode number
             train_improvement: Training set improvement rate
             val_improvement: Validation set improvement rate
-            test_improvement: Test set improvement rate
         """
         self.improvement_episodes.append(episode)
         
         self.train_improvement_history.append(train_improvement if train_improvement is not None else 0.0)
         self.val_improvement_history.append(val_improvement if val_improvement is not None else 0.0)
-        self.test_improvement_history.append(test_improvement if test_improvement is not None else 0.0)
     
     def update_best_improvement(self, improvement: float) -> bool:
         """Update the best improvement rate.

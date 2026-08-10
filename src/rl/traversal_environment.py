@@ -128,14 +128,16 @@ class TraversalEnvironment:
         height = self.quadtree.bbox.max_y - self.quadtree.bbox.min_y
         return float(np.sqrt(width ** 2 + height ** 2))
 
-    def reset(self, start_cell: Optional[QuadTreeCell] = None) -> Tuple[np.ndarray, np.ndarray]:
+    def reset(self, start_cell: Optional[QuadTreeCell] = None,
+              advance_episode: bool = True) -> Tuple[np.ndarray, np.ndarray]:
         """Reset episode state and return the initial observation plus action mask."""
         self.current_cell = start_cell or self.quadtree.root
         self.prev_cell = None
         self.visited_cells = {self.current_cell}
         self.visited_order = [self.current_cell]
         self.available_actions = self._compute_available_actions()
-        self.current_episode += 1
+        if advance_episode:
+            self.current_episode += 1
         self._global_eval_checkpoints = self._build_global_eval_checkpoints()
         self._global_query_indices_by_checkpoint = self._prepare_global_query_samples()
         self._prefix_order_lookup_cache = {}

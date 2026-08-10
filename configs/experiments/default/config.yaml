@@ -30,10 +30,6 @@ index:
   max_level: 8
   alpha: 2
   beta: 2
-  min_x: xxx
-  min_y: xxx
-  max_x: xxx
-  max_y: xxx
   use_original_bbox: true
   use_prune: true
   min_cell_trajs: 4
@@ -75,7 +71,6 @@ network:
   hidden_dims: [256, 256]
   device: auto
   dropout: 0.1
-  state_dim: 14
 
 train:
   lr_actor: 0.0003
