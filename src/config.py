@@ -339,11 +339,9 @@ class NetworkConfig:
     Attributes:
         hidden_dims: Hidden layer dimensions list of neural network
         device: Device option ('auto'/'cuda'/'cpu')
-        dropout: Dropout ratio
     """
     hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
     device: str = 'auto'
-    dropout: float = 0.1
 
     def get_torch_device(self) -> torch.device:
         """Get PyTorch device

@@ -59,10 +59,10 @@ def compute_query_signature(global_alpha: int, global_beta: int,
     grid_h = ee_h / (cell.beta + eps)
 
     i_start = int(np.floor((query_bbox.min_x - ee_bbox.min_x + eps) / grid_w))
-    i_end = int(np.floor((query_bbox.max_x - ee_bbox.min_x - eps) / grid_w))
+    i_end = int(np.floor((query_bbox.max_x - ee_bbox.min_x + eps) / grid_w))
 
     j_start = int(np.floor((query_bbox.min_y - ee_bbox.min_y + eps) / grid_h))
-    j_end = int(np.floor((query_bbox.max_y - ee_bbox.min_y - eps) / grid_h))
+    j_end = int(np.floor((query_bbox.max_y - ee_bbox.min_y + eps) / grid_h))
 
     i_start, i_end = max(0, i_start), min(cell.alpha - 1, i_end)
     j_start, j_end = max(0, j_start), min(cell.beta - 1, j_end)

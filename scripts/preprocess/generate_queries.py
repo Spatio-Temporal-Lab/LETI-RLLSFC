@@ -56,18 +56,25 @@ DATASET_CONFIGS = {
 QUERY_RANGES = [100, 500, 1000, 1500, 2000]
 QUERIES_PER_RANGE = 100
 
+#  Train/validation/test split ratios (test takes the remainder)
+TRAIN_RATIO = 0.6
+VAL_RATIO = 0.2
+
 
 class QueryGenerator:
     """Query generator - samples and generates queries from trajectory data"""
     
     def __init__(self, min_lon: float, min_lat: float, max_lon: float, max_lat: float,
-                 output_dir: Path, traj_path: Optional[str] = None):
+                 output_dir: Path, traj_path: Optional[str] = None, seed: int = 42):
         self.min_lon = min_lon
         self.min_lat = min_lat
         self.max_lon = max_lon
         self.max_lat = max_lat
         self.output_dir = output_dir
         self.traj_path = traj_path
+
+        random.seed(seed)
+        np.random.seed(seed)
         
         self.traj_points = self._load_trajectory_points()
         if not self.traj_points:
@@ -231,8 +238,8 @@ class QueryGenerator:
             
             random.shuffle(all_queries)
             total = len(all_queries)
-            train_size = int(total * 0.7)
-            val_size = int(total * 0.15)
+            train_size = int(total * TRAIN_RATIO)
+            val_size = int(total * VAL_RATIO)
             
             splits = {
                 'train': all_queries[:train_size],
@@ -257,9 +264,12 @@ class QueryGenerator:
         print(f"  File structure:")
         print(f"    range/[distribution]/[distribution]_[range]m.txt - By type and range files (100 each)")
         print(f"    gaussian/ | skewed/ | uniform/")
-        print(f"      - queries_train.json (350 queries)")
-        print(f"      - queries_val.json (75 queries)")
-        print(f"      - queries_test.json (75 queries)")
+        per_dist = len(QUERY_RANGES) * QUERIES_PER_RANGE
+        train_count = int(per_dist * TRAIN_RATIO)
+        val_count = int(per_dist * VAL_RATIO)
+        print(f"      - queries_train.json ({train_count} queries)")
+        print(f"      - queries_val.json ({val_count} queries)")
+        print(f"      - queries_test.json ({per_dist - train_count - val_count} queries)")
 
 
 def main():
@@ -274,6 +284,7 @@ def main():
     parser.add_argument('--max-lat', type=float, help='Maximum latitude')
     parser.add_argument('--traj-path', type=str, help='Trajectory data file path')
     parser.add_argument('--output-dir', type=str, help='Output directory')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed (default: 42)')
     
     args = parser.parse_args()
     
@@ -316,7 +327,8 @@ def main():
         max_lon=max_lon,
         max_lat=max_lat,
         output_dir=output_dir,
-        traj_path=traj_path
+        traj_path=traj_path,
+        seed=args.seed
     )
     generator.run()
 

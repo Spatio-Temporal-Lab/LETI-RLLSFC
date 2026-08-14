@@ -143,9 +143,9 @@ class TrajectoryOrderFormatter:
     ):
         if output_dir:
             self.output_dir = Path(output_dir)
-            self.output_dir.mkdir(parents=True, exist_ok=True)
         else:
             self.output_dir = config.experiment.get_results_dir(config.paths)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logger or setup_logging("TrajectoryOrderFormatter")
         self.config = config
         self.active_ordering: List[Dict[str, Any]] = []

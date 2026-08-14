@@ -24,31 +24,25 @@ class TraversalActorNetwork(nn.Module):
             Number of available actions.
         hidden_dims : List[int], optional
             List of hidden layer neuron counts (default: [256, 256]).
-        dropout_rate : float, optional
-            Dropout ratio (default: 0.1).
     """
 
-    DEFAULT_DROPOUT_RATE = 0.1
     MASKED_LOGIT_PENALTY = 1e9
 
     def __init__(
         self,
         state_dim: int,
         action_dim: int,
-        hidden_dims: List[int] = None,
-        dropout_rate: float = None
+        hidden_dims: List[int] = None
     ):
         super().__init__()
         hidden_dims = hidden_dims or [256, 256]
-        dropout_rate = dropout_rate if dropout_rate is not None else self.DEFAULT_DROPOUT_RATE
-        
+
         layers: List[nn.Module] = []
         input_dim = state_dim
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(input_dim, hidden_dim))
             layers.append(nn.LayerNorm(hidden_dim))
             layers.append(nn.ReLU())
-            layers.append(nn.Dropout(p=dropout_rate))
             input_dim = hidden_dim
         layers.append(nn.Linear(input_dim, action_dim))
         self.network = nn.Sequential(*layers)
@@ -183,8 +177,9 @@ class TraversalPolicyAgent:
             Computing device ("cpu" or "cuda").
         hidden_dims : List[int], optional
             Hidden layer structure (default: [256, 256]).
-        dropout_rate : float, optional
-            Dropout ratio (default: 0.1).
+        lr_schedule_episodes: int, default = 100
+            Number of update steps the cosine schedule anneals over; should match
+            the planned training episode count.
     """
 
     LR_SCHEDULER_T_MAX = 100
@@ -204,25 +199,28 @@ class TraversalPolicyAgent:
             gradient_clip_norm: float = 1.0,
             device: str = "cpu",
             hidden_dims: List[int] = None,
-            dropout_rate: float = None,
+            lr_schedule_episodes: int = LR_SCHEDULER_T_MAX,
     ):
         self.device = torch.device(device)
         self.action_dim = action_dim
 
         hidden_dims = hidden_dims or [256, 256]
         self.actor = TraversalActorNetwork(
-            state_dim, action_dim, hidden_dims, dropout_rate
+            state_dim, action_dim, hidden_dims
         ).to(self.device)
         self.critic = TraversalCriticNetwork(state_dim, hidden_dims).to(self.device)
+
+        self.actor.eval()
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr_critic)
 
+        t_max = max(1, lr_schedule_episodes)
         self.actor_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.actor_optimizer, T_max=self.LR_SCHEDULER_T_MAX, eta_min=self.LR_SCHEDULER_ETA_MIN
+            self.actor_optimizer, T_max=t_max, eta_min=self.LR_SCHEDULER_ETA_MIN
         )
         self.critic_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.critic_optimizer, T_max=self.LR_SCHEDULER_T_MAX, eta_min=self.LR_SCHEDULER_ETA_MIN
+            self.critic_optimizer, T_max=t_max, eta_min=self.LR_SCHEDULER_ETA_MIN
         )
 
         self.replay_buffer = ReplayBuffer()
