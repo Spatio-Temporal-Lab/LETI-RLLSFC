@@ -45,17 +45,23 @@ class PPOUpdater:
         rewards: List[float],
         values: torch.Tensor,
         dones: List[bool],
+        last_value: float = 0.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute normalized policy advantages and unnormalized critic returns."""
+        """Compute normalized policy advantages and unnormalized critic returns.
+
+        Args:
+            rewards: Per-step rewards
+            values: Value estimates recorded when the actions were taken
+            dones: Terminal flags aligned with rewards
+            last_value: Bootstrap value of the state following the final
+                transition; ignored when that transition is terminal
+        """
         raw_advantages: List[float] = []
         gae = 0.0
-        values_list = values.detach().cpu().numpy().tolist()
+        values_list = values.detach().cpu().reshape(-1).numpy().tolist()
 
         for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                next_value = 0.0 if dones[t] else values_list[t]
-            else:
-                next_value = values_list[t + 1]
+            next_value = last_value if t == len(rewards) - 1 else values_list[t + 1]
 
             delta = rewards[t] + self.gamma * next_value * (1.0 - float(dones[t])) - values_list[t]
             gae = delta + self.gamma * self.gae_lambda * (1.0 - float(dones[t])) * gae
@@ -65,7 +71,7 @@ class PPOUpdater:
         returns = raw_advantages_tensor + values
         normalized_advantages = (
             (raw_advantages_tensor - raw_advantages_tensor.mean())
-            / (raw_advantages_tensor.std() + self.ADVANTAGE_EPSILON)
+            / (raw_advantages_tensor.std(unbiased=False) + self.ADVANTAGE_EPSILON)
         )
         return normalized_advantages, returns
 
@@ -77,7 +83,7 @@ class PPOUpdater:
         old_states = torch.FloatTensor(np.array([t.state for t in transitions])).to(self.device)
         old_actions = torch.LongTensor([t.action for t in transitions]).to(self.device)
         old_log_probs = torch.stack([t.log_prob for t in transitions]).detach().to(self.device)
-        old_values = torch.stack([t.value for t in transitions]).squeeze().detach().to(self.device)
+        old_values = torch.stack([t.value for t in transitions]).reshape(-1).detach().to(self.device)
         old_masks = torch.FloatTensor(np.array([t.mask for t in transitions])).to(self.device)
 
         rewards = [t.reward for t in transitions]
@@ -96,7 +102,7 @@ class PPOUpdater:
             new_log_probs = dist.log_prob(old_actions)
             entropy = dist.entropy().mean()
 
-            new_values = self.critic(old_states).squeeze()
+            new_values = self.critic(old_states).reshape(-1)
 
             ratios = torch.exp(new_log_probs - old_log_probs)
             surr1 = ratios * advantages

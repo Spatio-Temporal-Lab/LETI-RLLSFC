@@ -118,6 +118,13 @@ class SignatureProcessor:
             if pts is not None:
                 traj_pts_list.append(np.array(pts))
                 valid_tids.append(tid)
+            else:
+                self.logger.warning(
+                    "Trajectory %s is assigned to cell %s but has no stored points; "
+                    "it will have no signature and stay unreachable by queries",
+                    tid,
+                    cell.code,
+                )
 
         if not traj_pts_list:
             cell.alpha, cell.beta = self.global_alpha, self.global_beta

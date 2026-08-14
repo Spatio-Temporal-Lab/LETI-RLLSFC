@@ -132,6 +132,7 @@ class TraversalTrainer:
         for episode in tqdm(range(self.config.train.num_episodes)):
             total_reward, steps = self._run_training_episode()
 
+            self.agent.ppo_updater.entropy_coef = self._current_entropy_coef(episode + 1)
             update_info = self.agent.update()
             if update_info and 'loss' in update_info:
                 self.state.record_episode(total_reward, steps, update_info['loss'])
@@ -264,7 +265,7 @@ class TraversalTrainer:
             gradient_clip_norm=self.config.train.gradient_clip_norm,
             device=self.network_config.get_torch_device(),
             hidden_dims=self.network_config.hidden_dims,
-            dropout_rate=self.network_config.dropout,
+            lr_schedule_episodes=self.config.train.num_episodes,
         )
 
     def _refine_action_mask(self, environment: TraversalEnvironment, action_mask: np.ndarray,
@@ -308,6 +309,17 @@ class TraversalTrainer:
 
         _, final_multiplier = self.config.train.topk_multipliers
         return max(1, int(round(base_limit * final_multiplier)))
+
+    def _current_entropy_coef(self, episode: int) -> float:
+        """Compute current entropy coefficient based on training progress."""
+        start_coef = self.config.train.entropy_coef_start
+        decay = self.config.train.entropy_decay_episodes
+        if not decay or decay <= 0:
+            return start_coef
+
+        end_coef = self.config.train.entropy_coef_end
+        progress = min(1.0, episode / decay)
+        return start_coef + (end_coef - start_coef) * progress
 
     def _select_top_similar_cells(self, environment: TraversalEnvironment,
                                   action_mask: np.ndarray,

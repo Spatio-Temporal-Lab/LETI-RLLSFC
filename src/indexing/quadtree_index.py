@@ -342,6 +342,12 @@ class QuadTreeIndex:
             cell.signatures[traj_id] = compute_traj_signature(self.alpha, self.beta, cell, points)
 
             self.trajectory_to_cells[traj_id] = cell
+        else:
+            self.logger.warning(
+                f"Trajectory {traj_id} not indexed: MBR lower-left corner "
+                f"({traj_bbox.min_x}, {traj_bbox.min_y}) falls outside the global bbox "
+                f"({self.bbox.min_x}, {self.bbox.min_y}) - ({self.bbox.max_x}, {self.bbox.max_y})"
+            )
 
     def compute_target_level(self, bbox: SpatialBoundingBox) -> int:
         """Compute trajectory corresponding level.
@@ -368,7 +374,9 @@ class QuadTreeIndex:
             gy = math.floor((y1 - self.bbox.min_y + eps) / h) * h + self.bbox.min_y
             return (gx + self.alpha * w >= x2 - eps) and (gy + self.beta * h >= y2 - eps)
 
-        target = l_suggested if check_containment(l_suggested) else l_suggested - 1
+        target = l_suggested
+        while target > 0 and not check_containment(target):
+            target -= 1
         return max(0, min(target, self.max_level))
 
     def trajectory_intersects_cell(self, trajectory_id: int, cell: QuadTreeCell) -> bool:

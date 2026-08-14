@@ -70,7 +70,6 @@ reward:
 network:
   hidden_dims: [256, 256]
   device: auto
-  dropout: 0.1
 
 train:
   lr_actor: 0.0003
