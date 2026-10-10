@@ -1,0 +1,13 @@
+﻿# Core Dependencies
+torch>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+tqdm>=4.65.0
+
+# Data Processing
+pandas>=2.0.3
+shapely>=2.0.5
+
+# Configuration Management
+pyyaml>=6.0.2
+dacite>=1.8.0

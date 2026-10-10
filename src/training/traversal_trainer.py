@@ -1,0 +1,728 @@
+"""
+Training loop coordinator: responsible for data loading, environment creation and reinforcement learning updates.
+"""
+import os
+import warnings
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+from src.config import NetworkConfig, TShapeConfig
+from src.common import SpatialBoundingBox
+from src.evaluation import TraversalPerformanceEvaluator
+from src.indexing import QuadTreeIndex, QuadTreeCell, TraversalOrderEncoder
+from src.common import TraversalCostEvaluator
+from src.rl import TraversalEnvironment, TraversalPolicyAgent
+from src.training.component_factory import TrainingComponentFactory
+from src.training.training_state import TrainingState
+from src.utils.similarity_matrix import SimilarityMatrix
+
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+warnings.filterwarnings("ignore", category=UserWarning)
+
+
+class TraversalTrainer:
+    """Training loop coordinator.
+
+    Responsible for coordinating the entire training process, including environment initialization,
+    agent training, evaluation and checkpoint saving.
+    """
+
+    def __init__(self, config: TShapeConfig, network_config: Optional[NetworkConfig] = None):
+        self.config = config
+        self.network_config = network_config or self.config.network
+
+        exp_dir = self.config.experiment.get_output_dir(self.config.paths)
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        self.config.experiment.get_checkpoints_dir(self.config.paths).mkdir(parents=True, exist_ok=True)
+        self.config.experiment.get_results_dir(self.config.paths).mkdir(parents=True, exist_ok=True)
+        self.config.experiment.get_logs_dir(self.config.paths).mkdir(parents=True, exist_ok=True)
+        self.config.experiment.get_figures_dir(self.config.paths).mkdir(parents=True, exist_ok=True)
+
+        from datetime import datetime
+        from src.utils.logger import setup_logging
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_id = timestamp
+        log_file = self.config.experiment.get_logs_dir(self.config.paths) / f"training_{timestamp}.log"
+        self.logger = setup_logging(f"Trainer_{self.config.experiment.name}", log_file=log_file)
+        self.logger.info(f"=== Initializing experiment: {self.config.experiment.name} ===")
+
+        self.quadtree: Optional[QuadTreeIndex] = None
+        self.environment: Optional[TraversalEnvironment] = None
+        self.agent: Optional[TraversalPolicyAgent] = None
+        self.encoder: Optional[TraversalOrderEncoder] = None
+        self.cost_evaluator: Optional[TraversalCostEvaluator] = None
+        self.similarity_matrix: Optional[SimilarityMatrix] = None
+
+        self.state = TrainingState()
+
+        self.factory = TrainingComponentFactory(config)
+
+    def setup(self) -> Tuple[TraversalEnvironment, QuadTreeIndex]:
+        """Build quadtree, assign trajectories, configure environment components and similarity matrix.
+        
+        Returns:
+            (environment, quadtree) tuple
+        """
+        print(f"\nInitializing training environment (quadtree max level: {self.config.index.max_level}) ---")
+
+        self.quadtree = self.factory.create_quadtree()
+
+        trajectories = self.factory.load_trajectories(self.quadtree)
+        print("Assigning trajectory data to cells...")
+        for trajectory_id, points in trajectories:
+            self.quadtree.assign_trajectory(trajectory_id, points)
+
+        if self.config.index.min_cell_trajs is not None:
+            self.quadtree.post_prune_tree(self.config.index.min_cell_trajs)
+
+        self.quadtree.compute_signatures(self.config.index.enable_sig_optimize)
+
+        self.encoder = TraversalOrderEncoder(
+            self.quadtree,
+            alpha=self.config.index.alpha,
+            beta=self.config.index.beta
+        )
+        self.cost_evaluator = TraversalCostEvaluator(self.quadtree)
+
+        self.environment = self.factory.create_environment(self.quadtree, self.cost_evaluator)
+
+        self.similarity_matrix = self.factory.setup_similarity_matrix(
+            self.quadtree,
+            self.cost_evaluator,
+            self.environment.all_cells
+        )
+
+        return self.environment, self.quadtree
+
+    def prepare_agent(self, model_path: Optional[str] = None) -> TraversalPolicyAgent:
+        """Create Actor-Critic model, optionally load pre-trained weights"""
+        if self.environment is None:
+            raise RuntimeError("Please call setup() to initialize environment first.")
+
+        self.agent = self.create_agent(
+            self.environment.state_dimension,
+            self.environment.action_dimension
+        )
+
+        if model_path:
+            self.agent.load(model_path)
+            self.agent.actor.eval()
+            print(f"Successfully loaded model weights: {model_path}")
+
+        return self.agent
+
+    def train(self) -> Dict[str, Any]:
+        """Main training process: execute complete reinforcement learning training loop."""
+        if self.environment is None or self.quadtree is None:
+            self.setup()
+        if self.agent is None:
+            self.prepare_agent()
+
+        self.logger.info(f"Starting training - Episodes: {self.config.train.num_episodes}")
+        self.logger.info(f"Evaluation interval: {self.config.train.eval_interval} | "
+                         f"Early stopping patience: {self.config.train.early_stopping_patience} | "
+                         f"Early stopping min delta: {self.config.train.early_stopping_min_delta * 100}%")
+
+        for episode in tqdm(range(self.config.train.num_episodes)):
+            total_reward, steps = self._run_training_episode()
+
+            self.agent.ppo_updater.entropy_coef = self._current_entropy_coef(episode + 1)
+            update_info = self.agent.update()
+            if update_info and 'loss' in update_info:
+                self.state.record_episode(total_reward, steps, update_info['loss'])
+            else:
+                self.state.record_episode(total_reward, steps)
+
+            if (episode + 1) % 10 == 0:
+                self.logger.info(f"Episode {episode + 1}: Reward={total_reward:.2f}, Steps={steps}")
+
+            if self._handle_periodic_evaluation(episode + 1):
+                self.state.early_stop_episode = episode + 1
+                self.logger.info(f"Early stopping triggered: no substantial improvement for {self.config.train.early_stopping_patience} consecutive evaluations")
+                break
+
+        return self._finalize_training()
+
+    def _run_training_episode(self) -> Tuple[float, int]:
+        """Run a single training episode, return total reward and steps."""
+        state, action_mask = self.environment.reset()
+        total_reward = 0.0
+        steps = 0
+
+        while True:
+            refined_mask = self._refine_action_mask(self.environment, action_mask)
+
+            action, log_prob, value = self.agent.select_action(state, refined_mask)
+
+            next_state, next_mask, reward, done, _ = self.environment.step(action)
+
+            self.agent.store_transition(state, action, reward, log_prob, value, refined_mask, done)
+
+            total_reward += reward
+            steps += 1
+            state, action_mask = next_state, next_mask
+
+            if done:
+                return total_reward, steps
+
+    def rollout_policy_order(
+            self,
+            agent: TraversalPolicyAgent,
+            environment: TraversalEnvironment,
+            max_rollout_multiplier: int = 4,
+    ) -> List[QuadTreeCell]:
+        """Execute deterministic rollout using current policy to obtain complete node traversal order."""
+        was_training = agent.actor.training
+        agent.actor.eval()
+        try:
+            state, action_mask = environment.reset(advance_episode=False)
+            max_steps = max_rollout_multiplier * max(1, environment.num_cells)
+            steps = 0
+
+            while len(environment.visited_cells) < environment.num_cells and steps < max_steps:
+                refined_mask = self._refine_action_mask(environment, action_mask, use_final_limit=True)
+                action, _, _ = agent.select_action(state, refined_mask, deterministic=True)
+                next_state, next_mask, _, done, _ = environment.step(action)
+                state, action_mask = next_state, next_mask
+                steps += 1
+                if done:
+                    break
+        finally:
+            if was_training:
+                agent.actor.train()
+
+        if len(environment.visited_cells) < environment.num_cells:
+            raise RuntimeError(f"Rollout failed: step limit exceeded ({steps}) without covering all nodes.")
+
+        return environment.quadorder()
+
+    def create_agent(self, state_dim: int, action_dim: int) -> TraversalPolicyAgent:
+        """Initialize PPO agent based on environment dimensions and network configuration."""
+        device = self.network_config.get_torch_device()
+        print(f"Using device: {device}")
+        
+        initial_entropy_coef = self.config.train.entropy_coef_start
+        
+        return TraversalPolicyAgent(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            lr_actor=self.config.train.lr_actor,
+            lr_critic=self.config.train.lr_critic,
+            eps_clip=self.config.train.eps_clip,
+            k_epochs=self.config.train.k_epochs,
+            gamma=self.config.train.gamma,
+            entropy_coef=initial_entropy_coef,
+            gae_lambda=self.config.train.gae_lambda,
+            gradient_clip_norm=self.config.train.gradient_clip_norm,
+            device=self.network_config.get_torch_device(),
+            hidden_dims=self.network_config.hidden_dims,
+            lr_schedule_episodes=self.config.train.num_episodes,
+        )
+
+    def _refine_action_mask(self, environment: TraversalEnvironment, action_mask: np.ndarray,
+                            use_final_limit: bool = False) -> np.ndarray:
+        """Filter action mask based on similarity to reduce agent search space."""
+        refined_mask = action_mask.copy()
+        current_limit = self._final_action_limit() if use_final_limit else self._current_action_limit(environment)
+
+        if current_limit and current_limit < action_mask.sum():
+            top_indices = self._select_top_similar_cells(environment, refined_mask, current_limit)
+            new_mask = np.zeros_like(refined_mask)
+            new_mask[top_indices] = 1
+            refined_mask = new_mask
+
+        environment.last_action_filter_info = {
+            "top_k": bool(current_limit),
+            "available_count": int(refined_mask.sum()),
+        }
+        return refined_mask
+
+    def _current_action_limit(self, environment: TraversalEnvironment) -> Optional[int]:
+        """Compute current Top-K action limit based on training progress."""
+        base_limit = self.config.train.topk_actions
+        if not base_limit or base_limit <= 0:
+            return None
+
+        start_multiplier, final_multiplier = self.config.train.topk_multipliers
+        start_limit = max(1, int(round(base_limit * start_multiplier)))
+        final_limit = max(1, int(round(base_limit * final_multiplier)))
+        decay = max(1, self.config.train.topk_decay_episodes)
+
+        progress = min(1.0, environment.current_episode / decay)
+        current = start_limit + (final_limit - start_limit) * progress
+        return max(1, int(round(current)))
+
+    def _final_action_limit(self) -> Optional[int]:
+        """Return the Top-K action limit the schedule converges to."""
+        base_limit = self.config.train.topk_actions
+        if not base_limit or base_limit <= 0:
+            return None
+
+        _, final_multiplier = self.config.train.topk_multipliers
+        return max(1, int(round(base_limit * final_multiplier)))
+
+    def _current_entropy_coef(self, episode: int) -> float:
+        """Compute current entropy coefficient based on training progress."""
+        start_coef = self.config.train.entropy_coef_start
+        decay = self.config.train.entropy_decay_episodes
+        if not decay or decay <= 0:
+            return start_coef
+
+        end_coef = self.config.train.entropy_coef_end
+        progress = min(1.0, episode / decay)
+        return start_coef + (end_coef - start_coef) * progress
+
+    def _select_top_similar_cells(self, environment: TraversalEnvironment,
+                                  action_mask: np.ndarray,
+                                  limit: int) -> List[int]:
+        """Compute similarity between current node and all candidate nodes, return Top-K indices."""
+        available_indices = np.where(action_mask > 0.5)[0]
+        if available_indices.size <= limit:
+            return available_indices.tolist()
+
+        current_node = environment.current_cell
+        if current_node is None:
+            return available_indices[:limit].tolist()
+
+        get_sim = (self.similarity_matrix.get_similarity if self.similarity_matrix
+                   else lambda n1, n2: environment.cost_evaluator.jaccard_similarity(n1, n2))
+
+        similarities = []
+        for idx in available_indices:
+            candidate = environment.all_cells[idx]
+            similarities.append((idx, get_sim(current_node, candidate)))
+
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        top_k = [idx for idx, _ in similarities[:limit]]
+        return top_k if top_k else available_indices[:limit].tolist()
+
+    def _build_evaluator(
+            self,
+            reference_queries: List[SpatialBoundingBox],
+    ) -> TraversalPerformanceEvaluator:
+        """Create unified evaluator based on current training context."""
+        return TraversalPerformanceEvaluator(
+            self.quadtree,
+            self.encoder,
+            self.cost_evaluator,
+            reference_queries=reference_queries,
+            quadcode_include_muted=self.config.index.quadcode_include_muted,
+        )
+
+    def _evaluate_query_sets(
+            self,
+            quadorder: List[QuadTreeCell],
+            *,
+            train_queries: Optional[List[SpatialBoundingBox]] = None,
+            val_queries: Optional[List[SpatialBoundingBox]] = None,
+            test_queries: Optional[List[SpatialBoundingBox]] = None,
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Execute unified evaluation on available query sets."""
+        metrics: Dict[str, Optional[Dict[str, Any]]] = {
+            "train": None,
+            "val": None,
+            "test": None,
+        }
+        datasets = {
+            "train": train_queries,
+            "val": val_queries,
+            "test": test_queries,
+        }
+
+        for split_name, queries in datasets.items():
+            if not queries:
+                continue
+            metrics[split_name] = self._build_evaluator(queries).evaluate_final_order(quadorder)
+
+        return metrics
+
+    def _log_split_metrics(self, split_name: str, metrics: Dict[str, Any], suffix: str = "") -> None:
+        """Unified output of evaluation results for a single dataset."""
+        split_label = split_name.capitalize()
+        improvement = metrics["improvement_percent"]
+        quadcode_cost = metrics["quadcode_avg_cost"]
+        quadorder_cost = metrics["quadorder_avg_cost"]
+
+        if suffix:
+            self.logger.info(f"{split_label} set improvement rate: {improvement:.2f}% {suffix}")
+        else:
+            self.logger.info(f"{split_label} set improvement rate: {improvement:.2f}%")
+        self.logger.info(f"{split_label} set Baseline average cost: {quadcode_cost:.2f}")
+        self.logger.info(f"{split_label} set Learned order average cost: {quadorder_cost:.2f}")
+
+    def _training_stats_snapshot(self) -> Dict[str, Any]:
+        """Build current training statistics snapshot."""
+        return {
+            "total_episodes": len(self.state.episode_rewards),
+            "avg_reward": float(np.mean(self.state.episode_rewards)) if self.state.episode_rewards else 0,
+            "final_reward": float(self.state.episode_rewards[-1]) if self.state.episode_rewards else 0,
+            "best_improvement": float(max(self.state.val_improvement_history)) if self.state.val_improvement_history else 0,
+            "early_stop_episode": self.state.early_stop_episode,
+        }
+
+    def _training_config_snapshot(self) -> Dict[str, Any]:
+        """Build training configuration snapshot for metrics persistence."""
+        return {
+            "max_level": self.config.index.max_level,
+            "alpha": self.config.index.alpha,
+            "beta": self.config.index.beta,
+            "num_trajectories": self.config.data.num_trajectories,
+            "num_episodes": len(self.state.episode_rewards),
+            "lr_actor": self.config.train.lr_actor,
+            "lr_critic": self.config.train.lr_critic,
+        }
+
+    def _write_json(self, path: Path, payload: Dict[str, Any], log_message: Optional[str] = None) -> None:
+        """Unified JSON file writing."""
+        import json
+
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+
+        if log_message:
+            self.logger.info(log_message.format(path=path))
+
+    def _handle_periodic_evaluation(self, episode: int) -> bool:
+        """Execute periodic evaluation logic."""
+        should_stop = False
+        if episode % self.config.train.eval_interval == 0 or episode == self.config.train.num_episodes:
+            evaluated = self._evaluate_and_checkpoint(episode)
+            if evaluated and self.config.train.enable_early_stopping:
+                should_stop = self._should_stop_early()
+
+        elif episode % 10 == 0:
+            avg_reward = self.state.get_recent_avg_reward(10)
+            self.logger.info(f"Episode {episode}: Recent 10 episodes average reward = {avg_reward:.2f}")
+
+        return should_stop
+
+    def _evaluate_and_checkpoint(self, episode: int) -> bool:
+        """Evaluate current policy performance on train and validation sets and save model checkpoint."""
+        avg_reward = self.state.get_recent_avg_reward(self.config.train.eval_interval)
+        self.logger.info(f"\n[Evaluation] Episode {episode}: Average reward = {avg_reward:.2f}")
+
+        environment = self.environment
+        agent = self.agent
+        train_queries = environment.reference_queries
+        val_queries = environment.val_queries
+        if val_queries is None:
+            self.logger.error("Validation set unavailable, skipping evaluation")
+            return False
+
+        quadorder = self.rollout_policy_order(agent, environment)
+        metrics = self._evaluate_query_sets(
+            quadorder,
+            train_queries=train_queries,
+            val_queries=val_queries,
+        )
+        train_metrics = metrics["train"]
+        val_metrics = metrics["val"]
+
+        if train_metrics:
+            self._log_split_metrics("train", train_metrics)
+        self._log_split_metrics("val", val_metrics, suffix="(vs Z-Order)")
+
+        train_imp = train_metrics["improvement_percent"] if train_metrics else 0.0
+        val_imp = val_metrics['improvement_percent']
+
+        self.state.record_evaluation(
+            episode,
+            train_improvement=train_imp,
+            val_improvement=val_imp
+        )
+
+        self._save_evaluation_history()
+
+        if episode % self.config.train.save_interval == 0:
+            ckpt_dir = self.config.experiment.get_checkpoints_dir(self.config.paths)
+            path = ckpt_dir / f"ep{episode:06d}_val{val_imp:+.2f}.pth"
+            agent.save(str(path))
+            self.logger.info(f"Model saved: {path}")
+
+            metrics_path = ckpt_dir / f"ep{episode:06d}_metrics.json"
+            self._save_checkpoint_metrics(metrics_path, episode, train_metrics, val_metrics)
+
+        return True
+
+    def _save_evaluation_history(self) -> None:
+        """Save evaluation history to JSON file."""
+        from datetime import datetime
+        
+        history = {
+            "timestamp": datetime.now().isoformat(),
+            "episodes": self.state.improvement_episodes,
+            "train_improvements": self.state.train_improvement_history,
+            "val_improvements": self.state.val_improvement_history,
+        }
+        
+        history_path = self.config.experiment.get_logs_dir(self.config.paths) / "evaluation_history.json"
+        self._write_json(history_path, history)
+
+    def _save_checkpoint_metrics(self, path: Path, episode: int, 
+                                  train_metrics: Optional[Dict], 
+                                  val_metrics: Dict) -> None:
+        """Save checkpoint evaluation metrics."""
+        metrics = {
+            "episode": episode,
+            "run_id": self.run_id,
+            "timestamp": datetime.now().isoformat(),
+            "train": train_metrics if train_metrics else None,
+            "val": val_metrics,
+        }
+        self._write_json(path, metrics, "Evaluation metrics saved: {path}")
+
+    def _finalize_training(self) -> Dict[str, Any]:
+        """Final evaluation, plotting and model saving after training ends"""
+        self.logger.info("=== Training completed, executing final evaluation ===")
+        self._plot_training_curves()
+
+        final_metrics = self._final_evaluation()
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        val_imp = final_metrics.get('val_metrics', {}).get('improvement_percent', 0)
+        
+        final_model_name = f"final_{timestamp}_val{val_imp:+.2f}.pth"
+        final_model_path = self.config.experiment.get_checkpoints_dir(self.config.paths) / final_model_name
+        self.agent.save(str(final_model_path))
+        self.logger.info(f"Final model saved: {final_model_path}")
+        
+        latest_path = self.config.experiment.get_checkpoints_dir(self.config.paths) / "latest.pth"
+        self.agent.save(str(latest_path))
+        
+        final_metrics_path = self.config.experiment.get_checkpoints_dir(self.config.paths) / f"final_{timestamp}_metrics.json"
+        self._save_final_metrics(final_metrics_path, final_metrics, final_model_name)
+        
+        self._save_training_summary(final_metrics)
+        
+        self._auto_select_best_model()
+        
+        return final_metrics
+
+    def _auto_select_best_model(self) -> None:
+        """Automatically select best model from saved metrics files."""
+        from src.evaluation.lsfc_evaluator import LSFCEvaluator
+        
+        self.logger.info("=== Automatically selecting best model ===")
+        
+        model_dir = self.config.experiment.get_checkpoints_dir(self.config.paths)
+        output_dir = self.config.experiment.get_results_dir(self.config.paths)
+        
+        evaluator = LSFCEvaluator(self.config, output_dir=str(output_dir))
+        
+        best_model_path, best_record = evaluator.select_best_model_from_metrics(
+            str(model_dir), run_id=self.run_id
+        )
+        
+        if best_model_path is None:
+            self.logger.warning("Best model not found")
+            return
+        
+        self.logger.info(f"Best model: {best_model_path.name}")
+        self.logger.info(f"  Episode: {best_record['episode']}")
+        self.logger.info(f"  Val Improvement: {best_record['val_improvement']:+.2f}%")
+        
+        evaluator._save_best_model_record(best_record)
+        self.logger.info("Best model record saved to results/best_model_record.json")
+
+    def _save_final_metrics(self, path: Path, final_metrics: Dict[str, Any], model_name: str) -> None:
+        """Save final evaluation metrics."""
+        summary = {
+            "model_name": model_name,
+            "timestamp": datetime.now().isoformat(),
+            "experiment_name": self.config.experiment.name,
+            "final_metrics": final_metrics,
+            "training_config": self._training_config_snapshot(),
+            "training_stats": self._training_stats_snapshot(),
+        }
+        self._write_json(path, summary, "Final metrics saved: {path}")
+
+    def _final_evaluation(self) -> Dict[str, Any]:
+        """Perform final evaluation of the last policy on the validation query set"""
+        environment = self.environment
+        val_queries = environment.val_queries
+        
+        if val_queries is None:
+            raise RuntimeError("Validation set unavailable")
+
+        quadorder = self.rollout_policy_order(self.agent, environment)
+        metrics = self._evaluate_query_sets(
+            quadorder,
+            val_queries=val_queries,
+        )
+        val_metrics = metrics["val"]
+
+        self.logger.info("=== Val query set evaluation results ===")
+        self._log_split_metrics("val", val_metrics)
+
+        return {
+            'val_metrics': val_metrics,
+            'improvement_percent': val_metrics['improvement_percent']
+        }
+    
+    def _load_saved_queries(self, filename: str):
+        """Load saved query set"""
+        import pickle
+        queries_dir = self.config.paths.queries_dir / self.config.datasets.active
+        query_path = queries_dir / filename
+        
+        if query_path.exists():
+            with open(query_path, 'rb') as f:
+                return pickle.load(f)
+        
+        self.logger.error(f"Query set file does not exist: {query_path}")
+        return None
+    
+    def _save_training_summary(self, final_metrics: Dict[str, Any]):
+        """Save training summary to log file"""
+        from datetime import datetime
+        
+        val_metrics = final_metrics.get('val_metrics', final_metrics)
+        
+        summary = {
+            "experiment_name": self.config.experiment.name,
+            "timestamp": datetime.now().isoformat(),
+            "config": {
+                "max_level": self.config.index.max_level,
+                "alpha": self.config.index.alpha,
+                "beta": self.config.index.beta,
+                "num_trajectories": self.config.data.num_trajectories,
+                "num_episodes": self.config.train.num_episodes,
+                "lr_actor": self.config.train.lr_actor,
+                "lr_critic": self.config.train.lr_critic,
+            },
+            "training_stats": self._training_stats_snapshot(),
+            "final_metrics": {
+                "quadcode_avg_cost": float(val_metrics['quadcode_avg_cost']),
+                "quadorder_avg_cost": float(val_metrics['quadorder_avg_cost']),
+                "improvement_percent": float(val_metrics['improvement_percent']),
+                "quadcode_nodes_hit": float(val_metrics['quadcode_nodes_hit']),
+                "quadorder_nodes_hit": float(val_metrics.get('quadorder_nodes_hit', 0)),
+            }
+        }
+        
+        summary_path = self.config.experiment.get_logs_dir(self.config.paths) / "training_summary.json"
+        self._write_json(summary_path, summary, "Training summary saved: {path}")
+
+    def _should_stop_early(self) -> bool:
+        """
+        Determine whether to trigger early stopping based on patience mechanism and trend stability.
+        Logic: If current improvement rate fails to exceed historical best, consume patience.
+        Returns:
+            Whether early stopping should be triggered
+        """
+        if not self.config.train.enable_early_stopping:
+            return False
+
+        if not self.state.val_improvement_history:
+            return False
+
+        current_improvement = self.state.val_improvement_history[-1]
+
+        self.state.update_negative_streak(current_improvement)
+
+        if self.state.negative_streak_counter >= self.config.train.max_negative_streak:
+            print(f"[EarlyStop] Circuit Breaker: Continuous negative improvement "
+                  f"for {self.config.train.max_negative_streak} times. Stopping.")
+            return True
+
+        is_significant_improvement = (
+                current_improvement > (self.state.best_improvement + self.config.train.early_stopping_min_delta))
+
+        if is_significant_improvement:
+            self.state.update_best_improvement(current_improvement)
+            print(f"[EarlyStop] New best: {current_improvement:.2f}%. Resetting patience.")
+            return False
+        else:
+            self.state.patience_counter += 1
+
+        stability_info = ""
+        if len(self.state.val_improvement_history) >= self.config.train.early_stopping_patience:
+            recent = self.state.val_improvement_history[-self.config.train.early_stopping_patience:]
+            max_diff = max(recent) - min(recent)
+            stability_info = f" (Recent stability: {max_diff:.4f})"
+
+        if self.state.patience_counter >= self.config.train.early_stopping_patience:
+            print(f"[EarlyStop] Triggered! Patience ({self.state.patience_counter}) exhausted.{stability_info}")
+            return True
+
+        return False
+
+    def _plot_training_curves(self) -> None:
+        """Plot and save training process curves (Reward, Loss, Improvement)."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_path = self.config.experiment.get_figures_dir(self.config.paths) / f"training_progress_{timestamp}.png"
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # (Reward, Loss, Improvement)
+        fig, (ax_rev, ax_loss, ax_imp) = plt.subplots(1, 3, figsize=(20, 6))
+
+        has_stopped = self.state.early_stop_episode is not None
+        stop_ep = self.state.early_stop_episode
+
+        # --- 1. Reward ---
+        rewards = np.array(self.state.episode_rewards)
+        reward_episodes = np.arange(1, len(rewards) + 1)
+        ax_rev.plot(reward_episodes, rewards, color='steelblue', alpha=0.3)
+        if len(rewards) >= 10:
+            ma = pd.Series(rewards).rolling(window=10).mean()
+            ax_rev.plot(reward_episodes, ma, color='firebrick', label='MA (10)')
+
+        if has_stopped:
+            ax_rev.axvline(x=stop_ep, color='orange', linestyle='--', linewidth=2, label=f'Early Stop ({stop_ep})')
+
+        ax_rev.set_title("Episode Reward")
+        ax_rev.set_xlabel("Episode")
+        ax_rev.grid(True, alpha=0.3)
+        ax_rev.legend()
+
+        # --- 2. Loss  ---
+        if self.state.loss_history:
+            losses = np.array(self.state.loss_history)
+            loss_episodes = np.arange(1, len(losses) + 1)
+            ax_loss.plot(loss_episodes, losses, color='purple', alpha=0.4)
+            if len(losses) >= 10:
+                ma_loss = pd.Series(losses).rolling(window=10).mean()
+                ax_loss.plot(loss_episodes, ma_loss, color='darkviolet', label='MA Loss')
+
+            if has_stopped:
+                ax_loss.axvline(x=stop_ep, color='orange', linestyle='--', linewidth=2, label=f'Early Stop ({stop_ep})')
+
+            ax_loss.set_title("Training Loss (Convergence)")
+            ax_loss.set_xlabel("Episode")
+            ax_loss.set_yscale('log')
+            ax_loss.grid(True, which="both", ls="-", alpha=0.2)
+            ax_loss.legend()
+        else:
+            ax_loss.text(0.5, 0.5, "No Loss Data", ha='center')
+
+        # --- 3. Improvement ---
+        if self.state.val_improvement_history:
+            ax_imp.plot(self.state.improvement_episodes, self.state.val_improvement_history,
+                        marker='o', markersize=4, color='forestgreen', label='Val Improvement %')
+            ax_imp.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+
+            if has_stopped:
+                ax_imp.axvline(x=stop_ep, color='orange', linestyle='--', linewidth=2, label=f'Early Stop ({stop_ep})')
+
+            if len(self.state.val_improvement_history) > 1:
+                z = np.polyfit(self.state.improvement_episodes, self.state.val_improvement_history, 1)
+                p = np.poly1d(z)
+                ax_imp.plot(self.state.improvement_episodes, p(self.state.improvement_episodes), "r--", alpha=0.7)
+            ax_imp.set_title("Improvement vs QuadCode")
+            ax_imp.set_ylabel("%")
+            ax_imp.set_xlabel("Episode")
+            ax_imp.grid(True, alpha=0.3)
+
+        plt.suptitle(f"TShape RL Training Metrics - {timestamp}", fontsize=14)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.savefig(save_path, dpi=300)
+        plt.close()
+        self.logger.info(f"Training curves saved: {save_path}")
+
+

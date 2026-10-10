@@ -1,0 +1,50 @@
+{
+  "ordering": [
+    {
+      "quad_code": 0,
+      "order": 0,
+      "parent": {"alpha": 2, "beta": 2, "level": 0, "element_code": 0, "xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0},
+      "coverage": {"effective_subtree_count": 4, "effective_subtree_orders": [1, 2, 3, 4]}
+    },
+    {
+      "quad_code": 1,
+      "order": 1,
+      "parent": {"alpha": 2, "beta": 2, "level": 1, "element_code": 1, "xmin": 0.0, "ymin": 0.0, "xmax": 0.5, "ymax": 0.5},
+      "coverage": {"effective_subtree_count": 0, "effective_subtree_orders": []}
+    },
+    {
+      "quad_code": 11,
+      "order": 2,
+      "parent": {"alpha": 2, "beta": 2, "level": 1, "element_code": 11, "xmin": 0.0, "ymin": 0.5, "xmax": 0.5, "ymax": 1.0},
+      "coverage": {"effective_subtree_count": 0, "effective_subtree_orders": []}
+    },
+    {
+      "quad_code": 6,
+      "order": 3,
+      "parent": {"alpha": 2, "beta": 2, "level": 1, "element_code": 6, "xmin": 0.5, "ymin": 0.0, "xmax": 1.0, "ymax": 0.5},
+      "coverage": {"effective_subtree_count": 0, "effective_subtree_orders": []}
+    },
+    {
+      "quad_code": 16,
+      "order": 4,
+      "parent": {"alpha": 2, "beta": 2, "level": 1, "element_code": 16, "xmin": 0.5, "ymin": 0.5, "xmax": 1.0, "ymax": 1.0},
+      "coverage": {"effective_subtree_count": 0, "effective_subtree_orders": []}
+    }
+  ],
+  "metadata": {
+    "total_cells": 5,
+    "active_cells": 5,
+    "spatial_boundary": {"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0},
+    "quadtree_max_level": 2,
+    "global_alpha": 2,
+    "global_beta": 2,
+    "generation_timestamp": "2026-01-01T00:00:00",
+    "version": "1.4",
+    "order_source": "rl_quadorder_example",
+    "effective_subtree_contiguous": false,
+    "partition_search": [[2, 2], [8, 8]],
+    "max_partition": 4,
+    "max_shape_count": 0,
+    "min_trajs": 4
+  }
+}
